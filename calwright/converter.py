@@ -30,6 +30,7 @@ COLUMN_ALIASES = {
     "recurrence": {"recurrence", "rrule", "repeat", "repeats"},
     "uid": {"uid", "id", "event_id"},
     "allday": {"allday", "all_day", "all-day", "full_day", "fullday"},
+    "exdate": {"exdate", "exception", "exceptions", "exception_date", "exclude", "skip"},
 }
 
 
@@ -102,6 +103,33 @@ def parse_datetime(value):
         except ValueError:
             continue
     raise ValueError("unrecognized datetime format: %r" % value)
+
+def split_date_list(text):
+    """Split comma-separated dates, preserving dates with internal commas like 'Nov 02, 2026'."""
+    tokens = [part.strip() for part in text.split(",") if part.strip()]
+    items = []
+    i = 0
+    while i < len(tokens):
+        candidate = tokens[i]
+        try:
+            parse_datetime(candidate)
+            items.append(candidate)
+            i += 1
+            continue
+        except ValueError:
+            pass
+        if i + 1 < len(tokens):
+            merged = candidate + ", " + tokens[i + 1]
+            try:
+                parse_datetime(merged)
+                items.append(merged)
+                i += 2
+                continue
+            except ValueError:
+                pass
+        items.append(candidate)
+        i += 1
+    return items
 
 
 def is_true(value):
@@ -263,6 +291,7 @@ class Event:
     rrule: str = ""
     uid: str = ""
     all_day: bool = False
+    exdates: list = field(default_factory=list)
     errors: list = field(default_factory=list)
 
     @property
@@ -317,6 +346,16 @@ def build_events(rows, default_tz=None, convert_to_utc=False):
             except ValueError as exc:
                 errors.append("unparseable duration: %s" % exc)
 
+        exdate_raw = (row.get("exdate") or "").strip()
+        raw_exdates = []
+        if exdate_raw:
+            for item in split_date_list(exdate_raw):
+                try:
+                    dt, is_date_only = parse_datetime(item)
+                    raw_exdates.append((dt, is_date_only))
+                except ValueError as exc:
+                    errors.append("unparseable exdate: %s" % exc)
+
         all_day = is_true(row.get("allday") or "") or (
             start_date_only and not end_raw and not duration_raw
         )
@@ -337,25 +376,42 @@ def build_events(rows, default_tz=None, convert_to_utc=False):
                 end = start + timedelta(hours=1)
 
         tzid = None
+        event_tz = None
         if not all_day and isinstance(start, datetime):
-            tzid, tz_error = resolve_tzid(row.get("timezone"), default_tz)
+            event_tz, tz_error = resolve_tzid(row.get("timezone"), default_tz)
             if tz_error:
                 errors.append(tz_error)
-            elif tzid:
-                zone = ZoneInfo(tzid)
-                if start.tzinfo is None:
-                    start = start.replace(tzinfo=zone)
-                else:
-                    start = start.astimezone(zone)
+            elif event_tz:
+                zone = ZoneInfo(event_tz)
+                start = start.replace(tzinfo=zone) if start.tzinfo is None else start.astimezone(zone)
                 if end is not None:
-                    if end.tzinfo is None:
-                        end = end.replace(tzinfo=zone)
-                    else:
-                        end = end.astimezone(zone)
-                if convert_to_utc:
+                    end = end.replace(tzinfo=zone) if end.tzinfo is None else end.astimezone(zone)
+
+        exdates = []
+        for dt, is_date_only in raw_exdates:
+            if all_day:
+                exdates.append(dt.date() if isinstance(dt, datetime) else dt)
+            else:
+                if is_date_only:
+                    time_part = start.time() if isinstance(start, datetime) else datetime.min.time()
+                    tz_part = start.tzinfo if isinstance(start, datetime) else (ZoneInfo(event_tz) if event_tz else None)
+                    dt = datetime.combine(dt.date(), time_part, tzinfo=tz_part)
+                elif event_tz:
+                    zone = ZoneInfo(event_tz)
+                    dt = dt.replace(tzinfo=zone) if dt.tzinfo is None else dt.astimezone(zone)
+                if convert_to_utc and isinstance(dt, datetime) and dt.tzinfo is not None:
+                    dt = dt.astimezone(timezone.utc)
+                exdates.append(dt)
+
+        if not all_day and isinstance(start, datetime):
+            if convert_to_utc:
+                if start.tzinfo is not None:
                     start = start.astimezone(timezone.utc)
-                    end = end.astimezone(timezone.utc) if end else None
-                    tzid = None
+                if end is not None and end.tzinfo is not None:
+                    end = end.astimezone(timezone.utc)
+                tzid = None
+            else:
+                tzid = event_tz
 
         rrule_raw = (row.get("recurrence") or "").strip()
         rrule = ""
@@ -386,6 +442,7 @@ def build_events(rows, default_tz=None, convert_to_utc=False):
             rrule=rrule,
             uid=uid,
             all_day=all_day,
+            exdates=exdates,
             errors=errors,
         ))
     return events
@@ -475,6 +532,17 @@ def build_vtimezone(tzid, reference_year):
 # ICS rendering
 # ---------------------------------------------------------------------------
 
+def _format_prop_datetime(prop_name, dt, all_day, tzid):
+    """Format a date or datetime property line with parameters (TZID, VALUE=DATE, or UTC)."""
+    if all_day:
+        val = dt.strftime("%Y%m%d") if isinstance(dt, (date, datetime)) else str(dt)
+        return content_line(prop_name, val, {"VALUE": "DATE"})
+    elif tzid:
+        local = dt.strftime("%Y%m%dT%H%M%S")
+        return content_line(prop_name, local, {"TZID": tzid})
+    return content_line(prop_name, format_datetime_ics(dt))
+
+
 def render_ics(events, prodid=PRODID):
     """Render a list of valid Events as an ICS calendar string."""
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -501,28 +569,17 @@ def render_ics(events, prodid=PRODID):
         lines.append(content_line("UID", event.uid))
         lines.append(content_line("DTSTAMP", now))
         lines.append(content_line("SUMMARY", escape_text(event.title)))
-        if event.all_day:
-            start_value = event.start.strftime("%Y%m%d")
-            lines.append(content_line("DTSTART", start_value, {"VALUE": "DATE"}))
-            if event.end:
-                lines.append(content_line("DTEND", event.end.strftime("%Y%m%d"),
-                                          {"VALUE": "DATE"}))
-        elif event.tzid:
-            local = event.start.strftime("%Y%m%dT%H%M%S")
-            lines.append(content_line("DTSTART", local, {"TZID": event.tzid}))
-            if event.end:
-                lines.append(content_line("DTEND", event.end.strftime("%Y%m%dT%H%M%S"),
-                                          {"TZID": event.tzid}))
-        else:
-            lines.append(content_line("DTSTART", format_datetime_ics(event.start)))
-            if event.end:
-                lines.append(content_line("DTEND", format_datetime_ics(event.end)))
+        lines.append(_format_prop_datetime("DTSTART", event.start, event.all_day, event.tzid))
+        if event.end:
+            lines.append(_format_prop_datetime("DTEND", event.end, event.all_day, event.tzid))
         if event.description:
             lines.append(content_line("DESCRIPTION", escape_text(event.description)))
         if event.location:
             lines.append(content_line("LOCATION", escape_text(event.location)))
         if event.rrule:
             lines.append(content_line("RRULE", event.rrule))
+        for exdate in event.exdates:
+            lines.append(_format_prop_datetime("EXDATE", exdate, event.all_day, event.tzid))
         lines.append("END:VEVENT")
     lines.append("END:VCALENDAR")
     return "\r\n".join(lines) + "\r\n"
@@ -594,5 +651,11 @@ def format_summary(events):
             line += " | %s" % event.location
         if event.rrule:
             line += " | repeats: %s" % event.rrule
+        if event.exdates:
+            formatted_exdates = [
+                ex.strftime("%Y-%m-%d") if isinstance(ex, datetime) else ex.isoformat()
+                for ex in event.exdates
+            ]
+            line += " | exceptions: %s" % ", ".join(formatted_exdates)
         out.append(line)
     return "\n".join(out)
