@@ -1,10 +1,9 @@
 """Tests for calwright. Run with: python -m unittest discover -s tests"""
 
-import re
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -17,6 +16,7 @@ from calwright.converter import (  # noqa: E402
     escape_text,
     fold_line,
     format_check_report,
+    format_duration_iso,
     format_summary,
     load_rows,
     normalize_headers,
@@ -128,6 +128,14 @@ class TestParseDuration(unittest.TestCase):
     def test_garbage_raises(self):
         with self.assertRaises(ValueError):
             parse_duration("a while")
+
+    def test_format_duration_iso(self):
+        self.assertEqual(format_duration_iso(timedelta(minutes=90)), "PT1H30M")
+        self.assertEqual(format_duration_iso(timedelta(hours=2)), "PT2H")
+        self.assertEqual(format_duration_iso(timedelta(seconds=45)), "PT45S")
+        self.assertEqual(format_duration_iso(timedelta(days=1, hours=2, minutes=30)), "P1DT2H30M")
+        self.assertEqual(format_duration_iso(timedelta(days=2)), "P2D")
+        self.assertEqual(format_duration_iso(timedelta(0)), "PT0S")
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +393,36 @@ class TestRenderIcs(unittest.TestCase):
         vevents = [c for c in cal["children"] if c["name"] == "VEVENT"]
         self.assertEqual(len(vevents), 1)
 
+    def test_prefer_duration_emits_duration_and_no_dtend(self):
+        text = "title,start,duration\nMeeting,2026-10-26 09:00,90\n"
+        ics_duration = render_ics(events_from(text), prefer_duration=True)
+        self.assertIn("DURATION:PT1H30M", ics_duration)
+        self.assertNotIn("DTEND", ics_duration)
+
+        ics_default = render_ics(events_from(text), prefer_duration=False)
+        self.assertIn("DTEND:20261026T103000", ics_default)
+        self.assertNotIn("DURATION", ics_default)
+
+    def test_prefer_duration_with_timezone(self):
+        text = "title,start,duration,timezone\nMeeting,2026-10-26 09:00,1h30m,America/New_York\n"
+        ics = render_ics(events_from(text), prefer_duration=True)
+        self.assertIn("DTSTART;TZID=America/New_York:20261026T090000", ics)
+        self.assertIn("DURATION:PT1H30M", ics)
+        self.assertNotIn("DTEND", ics)
+
+    def test_prefer_duration_ignores_events_with_end_column(self):
+        text = "title,start,end\nMeeting,2026-10-26 09:00,2026-10-26 10:30\n"
+        ics = render_ics(events_from(text), prefer_duration=True)
+        self.assertIn("DTEND:20261026T103000", ics)
+        self.assertNotIn("DURATION", ics)
+
+    def test_prefer_duration_ignores_all_day_events(self):
+        text = "title,start,all_day\nHoliday,2026-10-26,yes\n"
+        ics = render_ics(events_from(text), prefer_duration=True)
+        self.assertIn("DTSTART;VALUE=DATE:20261026", ics)
+        self.assertIn("DTEND;VALUE=DATE:20261027", ics)
+        self.assertNotIn("DURATION", ics)
+
 
 # ---------------------------------------------------------------------------
 # Validation reporting
@@ -476,6 +514,29 @@ class TestCli(unittest.TestCase):
             self.assertEqual(main([src, "-o", out, "--utc"]), 0)
             text = Path(out).read_text(encoding="utf-8")
             self.assertIn("DTSTART:20261023T140000Z", text)
+
+    def test_parser_has_prefer_duration_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["--prefer-duration"])
+        self.assertTrue(args.prefer_duration)
+
+    def test_prefer_duration_flag_emits_duration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = self.write_csv(directory, "title,start,duration\nMeeting,2026-10-26 09:00,90\n")
+            out = str(Path(directory) / "out.ics")
+            self.assertEqual(main([src, "-o", out, "--prefer-duration"]), 0)
+            text = Path(out).read_text(encoding="utf-8")
+            self.assertIn("DURATION:PT1H30M", text)
+            self.assertNotIn("DTEND", text)
+
+    def test_prefer_duration_flag_off_keeps_dtend(self):
+        with tempfile.TemporaryDirectory() as directory:
+            src = self.write_csv(directory, "title,start,duration\nMeeting,2026-10-26 09:00,90\n")
+            out = str(Path(directory) / "out.ics")
+            self.assertEqual(main([src, "-o", out]), 0)
+            text = Path(out).read_text(encoding="utf-8")
+            self.assertIn("DTEND:20261026T103000", text)
+            self.assertNotIn("DURATION", text)
 
 
 if __name__ == "__main__":

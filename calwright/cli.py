@@ -36,6 +36,8 @@ def build_parser():
                              "for example America/New_York")
     parser.add_argument("--utc", action="store_true",
                         help="Convert all event times to UTC (Z suffix) in the output")
+    parser.add_argument("--prefer-duration", action="store_true",
+                        help="Emit DURATION instead of DTEND for timed events given a duration column")
     parser.add_argument("--version", action="version", version="calwright %s" % __version__)
     return parser
 
@@ -82,7 +84,7 @@ def main(argv=None):
     if args.summary:
         print(format_summary(events))
 
-    ics_text = render_ics(events)
+    ics_text = render_ics(events, prefer_duration=args.prefer_duration)
     if args.output:
         try:
             with open(args.output, "w", encoding="utf-8", newline="") as handle:

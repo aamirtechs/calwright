@@ -137,6 +137,32 @@ def parse_duration(value):
     raise ValueError("unrecognized duration: %r" % value)
 
 
+def format_duration_iso(td):
+    """Format a timedelta as an RFC 5545 / ISO 8601 duration string, e.g. PT1H30M."""
+    total_seconds = int(td.total_seconds())
+    if total_seconds == 0:
+        return "PT0S"
+    sign = "-" if total_seconds < 0 else ""
+    total_seconds = abs(total_seconds)
+    days, rem = divmod(total_seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+
+    parts = []
+    if days:
+        parts.append("%dD" % days)
+    time_parts = []
+    if hours:
+        time_parts.append("%dH" % hours)
+    if minutes:
+        time_parts.append("%dM" % minutes)
+    if seconds:
+        time_parts.append("%dS" % seconds)
+
+    time_str = ("T" + "".join(time_parts)) if time_parts else ""
+    return "%sP%s%s" % (sign, "".join(parts), time_str)
+
+
 # ---------------------------------------------------------------------------
 # RRULE validation
 # ---------------------------------------------------------------------------
@@ -264,6 +290,7 @@ class Event:
     uid: str = ""
     all_day: bool = False
     errors: list = field(default_factory=list)
+    duration: timedelta | None = None
 
     @property
     def ok(self):
@@ -306,6 +333,7 @@ def build_events(rows, default_tz=None, convert_to_utc=False):
         duration_raw = (row.get("duration") or "").strip()
         end = None
         end_date_only = False
+        parsed_duration = None
         if end_raw:
             try:
                 end, end_date_only = parse_datetime(end_raw)
@@ -313,7 +341,8 @@ def build_events(rows, default_tz=None, convert_to_utc=False):
                 errors.append("unparseable end: %s" % exc)
         elif duration_raw and start is not None:
             try:
-                end = start + parse_duration(duration_raw)
+                parsed_duration = parse_duration(duration_raw)
+                end = start + parsed_duration
             except ValueError as exc:
                 errors.append("unparseable duration: %s" % exc)
 
@@ -387,6 +416,7 @@ def build_events(rows, default_tz=None, convert_to_utc=False):
             uid=uid,
             all_day=all_day,
             errors=errors,
+            duration=parsed_duration if not all_day else None,
         ))
     return events
 
@@ -475,7 +505,7 @@ def build_vtimezone(tzid, reference_year):
 # ICS rendering
 # ---------------------------------------------------------------------------
 
-def render_ics(events, prodid=PRODID):
+def render_ics(events, prodid=PRODID, prefer_duration=False):
     """Render a list of valid Events as an ICS calendar string."""
     now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     lines = [
@@ -510,12 +540,16 @@ def render_ics(events, prodid=PRODID):
         elif event.tzid:
             local = event.start.strftime("%Y%m%dT%H%M%S")
             lines.append(content_line("DTSTART", local, {"TZID": event.tzid}))
-            if event.end:
+            if prefer_duration and event.duration is not None:
+                lines.append(content_line("DURATION", format_duration_iso(event.duration)))
+            elif event.end:
                 lines.append(content_line("DTEND", event.end.strftime("%Y%m%dT%H%M%S"),
                                           {"TZID": event.tzid}))
         else:
             lines.append(content_line("DTSTART", format_datetime_ics(event.start)))
-            if event.end:
+            if prefer_duration and event.duration is not None:
+                lines.append(content_line("DURATION", format_duration_iso(event.duration)))
+            elif event.end:
                 lines.append(content_line("DTEND", format_datetime_ics(event.end)))
         if event.description:
             lines.append(content_line("DESCRIPTION", escape_text(event.description)))
