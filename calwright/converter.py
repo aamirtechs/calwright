@@ -228,6 +228,42 @@ def validate_rrule(value):
     return problems
 
 
+def check_rrule_until(rrule_str, start):
+    """Verify that RRULE UNTIL is not earlier than start."""
+    parts = rrule_str.split(";")
+    until_raw = None
+    for part in parts:
+        if "=" in part:
+            key, _, val = part.partition("=")
+            if key.strip().upper() == "UNTIL":
+                until_raw = val.strip()
+                break
+    if not until_raw or start is None:
+        return None
+    try:
+        until_dt, is_date_only = parse_datetime(until_raw)
+    except ValueError:
+        return None
+
+    if isinstance(start, datetime) and start.tzinfo is not None:
+        if until_dt.tzinfo is not None:
+            until_dt = until_dt.astimezone(start.tzinfo)
+        else:
+            until_dt = until_dt.replace(tzinfo=start.tzinfo)
+    elif isinstance(start, datetime) and start.tzinfo is None and until_dt.tzinfo is not None:
+        until_dt = until_dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+    if is_date_only or (isinstance(start, date) and not isinstance(start, datetime)):
+        start_date = start.date() if isinstance(start, datetime) else start
+        until_date = until_dt.date() if isinstance(until_dt, datetime) else until_dt
+        if until_date < start_date:
+            return "RRULE UNTIL is before start"
+    else:
+        if until_dt < start:
+            return "RRULE UNTIL is before start"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # ICS text encoding
 # ---------------------------------------------------------------------------
@@ -423,6 +459,10 @@ def build_events(rows, default_tz=None, convert_to_utc=False):
                 rrule = rrule_raw.upper()
                 if rrule.startswith("RRULE:"):
                     rrule = rrule[len("RRULE:"):]
+                if start is not None:
+                    until_error = check_rrule_until(rrule, start)
+                    if until_error:
+                        errors.append(until_error)
 
         uid = (row.get("uid") or "").strip()
         if not uid and title and start is not None:
