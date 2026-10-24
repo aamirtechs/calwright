@@ -10,6 +10,7 @@ from .converter import (
     build_events,
     format_check_report,
     format_summary,
+    load_json_rows,
     load_rows,
     render_ics,
     validate_events,
@@ -36,6 +37,9 @@ def build_parser():
                              "for example America/New_York")
     parser.add_argument("--utc", action="store_true",
                         help="Convert all event times to UTC (Z suffix) in the output")
+    parser.add_argument("--from-json", action="store_true",
+                        help="treat the input as a JSON array of objects "
+                             "instead of CSV (same canonical field names)")
     parser.add_argument("--version", action="version", version="calwright %s" % __version__)
     return parser
 
@@ -61,7 +65,7 @@ def main(argv=None):
         return 2
 
     try:
-        rows = load_rows(csv_text)
+        rows = load_json_rows(csv_text) if args.from_json else load_rows(csv_text)
     except ValueError as exc:
         print("calwright: %s" % exc, file=sys.stderr)
         return 2

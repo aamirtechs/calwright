@@ -160,10 +160,15 @@ to assign a timezone, or `--utc` to normalize everything to UTC (`Z` suffix).
 ## Usage
 
 ```
-calwright [-h] [-o OUTPUT] [--check] [--summary] [--default-tz TZID] [--utc] [--version] [input]
+calwright [-h] [-o OUTPUT] [--check] [--summary] [--default-tz TZID] [--utc] [--from-json] [--version] [input]
 ```
 
 - `input`: CSV file, or omit to read from standard input.
+- `--from-json`: treat the input as a JSON array of objects with the same canonical field names (`title`, `start`, `end`, ...) instead of CSV — handy for pipelines that already emit JSON:
+
+  ```bash
+  curl -s https://api.example.com/events | calwright --from-json -o schedule.ics
+  ```
 - `-o`, `--output`: write the `.ics` here instead of standard output.
 - `--check`: audit the CSV and report problems with row numbers. Writes nothing.
 - `--summary`: print a human-readable preview of the events before writing.

@@ -18,6 +18,7 @@ from calwright.converter import (  # noqa: E402
     fold_line,
     format_check_report,
     format_summary,
+    load_json_rows,
     load_rows,
     normalize_headers,
     parse_datetime,
@@ -28,6 +29,25 @@ from calwright.converter import (  # noqa: E402
 )
 from calwright.cli import build_parser, main  # noqa: E402
 
+
+
+
+def run_cli(argv, input_text=None):
+    """Run main() with stdin patched; returns (code, stdout, stderr)."""
+    import io as _io
+    from contextlib import redirect_stdout, redirect_stderr
+    out, err = _io.StringIO(), _io.StringIO()
+    original = sys.stdin
+    class _In:
+        def read(self):
+            return input_text or ""
+    sys.stdin = _In()
+    try:
+        with redirect_stdout(out), redirect_stderr(err):
+            code = main(argv)
+    finally:
+        sys.stdin = original
+    return code, out.getvalue(), err.getvalue()
 
 def make_rows(text):
     return load_rows(text)
@@ -480,3 +500,50 @@ class TestCli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------- --from-json ----------
+
+class FromJsonTests(unittest.TestCase):
+    CSV = "title,start,end\nStandup,2026-10-24 09:00,2026-10-24 09:15\n"
+    JSON = '[{"title": "Standup", "start": "2026-10-24 09:00", "end": "2026-10-24 09:15"}]'
+
+    def test_json_array_loads_to_the_same_events_as_csv(self):
+        from_csv = build_events(load_rows(self.CSV))
+        from_json = build_events(load_json_rows(self.JSON))
+        self.assertEqual(
+            [(e.title, e.start, e.end, e.all_day) for e in from_csv],
+            [(e.title, e.start, e.end, e.all_day) for e in from_json],
+        )
+
+    def test_missing_fields_are_tolerated(self):
+        rows = load_json_rows('[{"title": "Only a title"}]')
+        events = build_events(rows)
+        self.assertEqual(len(events), 1)
+        self.assertFalse(events[0].ok)      # start missing -> reported, not crashed
+        self.assertEqual(events[0].title, "Only a title")
+
+    def test_header_normalization_applies_to_keys(self):
+        rows = load_json_rows('[{"Title": "Sync", "Start": "2026-10-24 10:00"}]')
+        self.assertEqual(rows[0][1]["title"], "Sync")
+        self.assertIn("start", rows[0][1])
+
+    def test_unknown_keys_are_dropped(self):
+        rows = load_json_rows('[{"title": "Sync", "bogus_field": "x"}]')
+        self.assertEqual(rows[0][1], {"title": "Sync"})
+
+    def test_invalid_json_exits_two(self):
+        code, _, err = run_cli(["--from-json"], input_text="{not json")
+        self.assertEqual(code, 2)
+        self.assertIn("invalid JSON", err)
+
+    def test_non_array_exits_two(self):
+        code, _, err = run_cli(["--from-json"], input_text='{"title": "nope"}')
+        self.assertEqual(code, 2)
+        self.assertIn("array of objects", err)
+
+    def test_cli_end_to_end_produces_ics(self):
+        code, out, _ = run_cli(["--from-json"], input_text=self.JSON)
+        self.assertEqual(code, 0)
+        self.assertIn("BEGIN:VCALENDAR", out)
+        self.assertIn("Standup", out)

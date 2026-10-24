@@ -6,6 +6,7 @@ Everything here uses the Python standard library only.
 from __future__ import annotations
 
 import csv
+import json
 import io
 import re
 import uuid
@@ -552,6 +553,37 @@ def load_rows(csv_text):
             canonical = mapping.get(header)
             if canonical and canonical not in normalized:
                 normalized[canonical] = value or ""
+        rows.append((index, normalized))
+    return rows
+
+
+def load_json_rows(json_text):
+    """Parse a JSON array of objects into (row_number, dict) pairs.
+
+    Field names go through the same header normalization as CSV, missing
+    canonical fields are tolerated (build_events fills defaults), and
+    nested or non-object entries raise ValueError.
+    """
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid JSON: %s" % exc.msg) from exc
+    if not isinstance(data, list):
+        raise ValueError("JSON input must be an array of objects")
+    rows = []
+    for index, entry in enumerate(data, start=1):
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            raise ValueError("JSON entry %d is not an object" % index)
+        if all((value or "").strip() == "" for value in entry.values()
+               if isinstance(value, str)):
+            continue
+        normalized = {}
+        for header, value in entry.items():
+            canonical = normalize_headers([header]).get(header)
+            if canonical and canonical not in normalized:
+                normalized[canonical] = "" if value is None else str(value)
         rows.append((index, normalized))
     return rows
 
