@@ -160,7 +160,7 @@ to assign a timezone, or `--utc` to normalize everything to UTC (`Z` suffix).
 ## Usage
 
 ```
-calwright [-h] [-o OUTPUT] [--check] [--summary] [--default-tz TZID] [--utc] [--version] [input]
+calwright [-h] [-o OUTPUT] [--check] [--summary] [--default-tz TZID] [--utc] [--prefer-duration] [--version] [input]
 ```
 
 - `input`: CSV file, or omit to read from standard input.
@@ -169,6 +169,7 @@ calwright [-h] [-o OUTPUT] [--check] [--summary] [--default-tz TZID] [--utc] [--
 - `--summary`: print a human-readable preview of the events before writing.
 - `--default-tz`: IANA timezone applied to naive datetimes.
 - `--utc`: convert all event times to UTC in the output.
+- `--prefer-duration`: emit RFC 5545 DURATION property instead of DTEND for timed events with a duration column.
 
 Pipe-friendly:
 

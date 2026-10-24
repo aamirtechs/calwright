@@ -3,6 +3,11 @@
 All notable changes to calwright are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+- `--prefer-duration` CLI flag to emit RFC 5545 `DURATION` properties instead of `DTEND` for timed events specified with a duration column.
+
 ## [1.0.0] - 2026-10-23
 
 ### Added
