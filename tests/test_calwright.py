@@ -327,6 +327,38 @@ class TestBuildEvents(unittest.TestCase):
         self.assertEqual(len(event.exdates), 2)
         self.assertEqual(event.exdates[0].date(), date(2026, 11, 2))
         self.assertEqual(event.exdates[1].date(), date(2026, 11, 9))
+    def test_rrule_until_before_start_is_error(self):
+        csv = "title,start,recurrence\nSync,2026-10-26 09:00,FREQ=DAILY;UNTIL=20200101T000000Z\n"
+        events = events_from(csv)
+        self.assertFalse(events[0].ok)
+        self.assertTrue(any("RRULE UNTIL is before start" in e for e in events[0].errors))
+
+    def test_rrule_until_after_start_passes(self):
+        csv = "title,start,recurrence\nSync,2026-10-26 09:00,FREQ=DAILY;UNTIL=20261101T000000Z\n"
+        events = events_from(csv)
+        self.assertTrue(events[0].ok)
+
+    def test_rrule_until_date_only_same_day_passes(self):
+        csv = "title,start,recurrence\nSync,2026-10-26 09:00,FREQ=DAILY;UNTIL=20261026\n"
+        events = events_from(csv)
+        self.assertTrue(events[0].ok)
+
+    def test_rrule_until_date_only_earlier_fails(self):
+        csv = "title,start,recurrence\nSync,2026-10-26 09:00,FREQ=DAILY;UNTIL=20261025\n"
+        events = events_from(csv)
+        self.assertFalse(events[0].ok)
+        self.assertTrue(any("RRULE UNTIL is before start" in e for e in events[0].errors))
+
+    def test_rrule_until_timezone_day_boundary(self):
+        # 21:00 EDT on Oct 26 is 01:00 UTC on Oct 27.
+        # An UNTIL of 00:30 UTC on Oct 27 is 20:30 EDT on Oct 26 (earlier than 21:00 EDT start).
+        csv = (
+            "title,start,timezone,recurrence\n"
+            "LateEvent,2026-10-26 21:00,America/New_York,FREQ=DAILY;UNTIL=20261027T003000Z\n"
+        )
+        events = events_from(csv)
+        self.assertFalse(events[0].ok)
+        self.assertTrue(any("RRULE UNTIL is before start" in e for e in events[0].errors))
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +554,12 @@ class TestValidation(unittest.TestCase):
         csv = "title,start,recurrence,exdate\nStandup,2026-10-26 09:00,FREQ=DAILY,\"2026-11-02, 2026-11-09\"\n"
         summary = format_summary(events_from(csv))
         self.assertIn("exceptions: 2026-11-02, 2026-11-09", summary)
+    def test_rrule_until_before_start_reported_with_row(self):
+        events = events_from("title,start,recurrence\nSync,2026-10-26 09:00,FREQ=DAILY;UNTIL=20200101T000000Z\n")
+        problems = validate_events(events)
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(problems[0][0], 2)
+        self.assertTrue(any("RRULE UNTIL is before start" in e for e in problems[0][1]))
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +592,17 @@ class TestCli(unittest.TestCase):
             self.assertEqual(exit_code, 1)
             output = buf.getvalue()
             self.assertIn("row 2: unparseable exdate", output)
+
+    def test_check_flags_rrule_until_before_start(self):
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_csv(directory, "title,start,recurrence\nSync,2026-10-26 09:00,FREQ=DAILY;UNTIL=20200101T000000Z\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                exit_code = main([path, "--check"])
+            self.assertEqual(exit_code, 1)
+            output = buf.getvalue()
+            self.assertIn("row 2: RRULE UNTIL is before start", output)
 
     def test_convert_writes_file(self):
         with tempfile.TemporaryDirectory() as directory:
