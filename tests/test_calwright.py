@@ -1,5 +1,6 @@
 """Tests for calwright. Run with: python -m unittest discover -s tests"""
 
+import io
 import re
 import sys
 import tempfile
@@ -66,6 +67,15 @@ class TestNormalizeHeaders(unittest.TestCase):
         self.assertEqual(mapping["All-Day"], "allday")
         self.assertEqual(mapping["event_id"], "uid")
         self.assertEqual(mapping["Repeats"], "recurrence")
+
+    def test_exdate_aliases(self):
+        mapping = normalize_headers(["EXDATE", "Exception", "Exceptions", "exception_date", "Exclude", "Skip"])
+        self.assertEqual(mapping["EXDATE"], "exdate")
+        self.assertEqual(mapping["Exception"], "exdate")
+        self.assertEqual(mapping["Exceptions"], "exdate")
+        self.assertEqual(mapping["exception_date"], "exdate")
+        self.assertEqual(mapping["Exclude"], "exdate")
+        self.assertEqual(mapping["Skip"], "exdate")
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +278,56 @@ class TestBuildEvents(unittest.TestCase):
         events = events_from("title,start\nX,2026-10-23 10:00\n")
         self.assertEqual(events[0].end, datetime(2026, 10, 23, 11, 0))
 
+    def test_exdate_parsing_and_time_inheritance(self):
+        csv = (
+            "title,start,timezone,recurrence,exdate\n"
+            "Standup,2026-10-26 09:00,America/New_York,FREQ=DAILY,\" 2026-11-02 , , 2026-11-09 , \"\n"
+        )
+        events = events_from(csv)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertTrue(event.ok)
+        self.assertEqual(len(event.exdates), 2)
+        expected_tz = ZoneInfo("America/New_York")
+        self.assertEqual(event.exdates[0], datetime(2026, 11, 2, 9, 0, tzinfo=expected_tz))
+        self.assertEqual(event.exdates[1], datetime(2026, 11, 9, 9, 0, tzinfo=expected_tz))
+
+    def test_exdate_all_day_and_explicit_time(self):
+        csv_allday = "title,start,allday,exdate\nHoliday,2026-11-01,true,2026-11-08\n"
+        events = events_from(csv_allday)
+        self.assertEqual(events[0].exdates, [date(2026, 11, 8)])
+
+        csv_explicit = (
+            "title,start,timezone,exdate\n"
+            "Workshop,2026-10-26 09:00,America/New_York,2026-11-02 14:30\n"
+        )
+        events2 = events_from(csv_explicit)
+        expected_tz = ZoneInfo("America/New_York")
+        self.assertEqual(events2[0].exdates, [datetime(2026, 11, 2, 14, 30, tzinfo=expected_tz)])
+
+    def test_exdate_utc_conversion(self):
+        csv = (
+            "title,start,timezone,exdate\n"
+            "Sync,2026-10-26 09:00,America/New_York,2026-11-02\n"
+        )
+        events = events_from(csv, convert_to_utc=True)
+        event = events[0]
+        self.assertTrue(event.ok)
+        self.assertEqual(event.exdates[0].utcoffset(), timedelta(0))
+
+    def test_exdate_with_internal_commas(self):
+        csv = (
+            "title,start,timezone,recurrence,exdate\n"
+            'Standup,2026-10-26 09:00,America/New_York,FREQ=DAILY,"Nov 02, 2026, November 09, 2026"\n'
+        )
+        events = events_from(csv)
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertTrue(event.ok)
+        self.assertEqual(len(event.exdates), 2)
+        self.assertEqual(event.exdates[0].date(), date(2026, 11, 2))
+        self.assertEqual(event.exdates[1].date(), date(2026, 11, 9))
+
 
 # ---------------------------------------------------------------------------
 # VTIMEZONE
@@ -385,6 +445,40 @@ class TestRenderIcs(unittest.TestCase):
         vevents = [c for c in cal["children"] if c["name"] == "VEVENT"]
         self.assertEqual(len(vevents), 1)
 
+    def test_exdate_rendering(self):
+        # TZID rendering
+        csv_tz = (
+            "title,start,timezone,recurrence,exdate\n"
+            "Standup,2026-10-26 09:00,America/New_York,FREQ=DAILY,\"2026-11-02, 2026-11-09\"\n"
+        )
+        ics_tz = render_ics(events_from(csv_tz))
+        self.assertIn("EXDATE;TZID=America/New_York:20261102T090000", ics_tz)
+        self.assertIn("EXDATE;TZID=America/New_York:20261109T090000", ics_tz)
+
+        # All-day rendering
+        csv_allday = (
+            "title,start,allday,recurrence,exdate\n"
+            "Holiday,2026-11-01,true,FREQ=WEEKLY,2026-11-08\n"
+        )
+        ics_allday = render_ics(events_from(csv_allday))
+        self.assertIn("EXDATE;VALUE=DATE:20261108", ics_allday)
+
+        # UTC rendering
+        csv_utc = (
+            "title,start,timezone,recurrence,exdate\n"
+            "Sync,2026-10-26 09:00,America/New_York,FREQ=DAILY,2026-11-02\n"
+        )
+        ics_utc = render_ics(events_from(csv_utc, convert_to_utc=True))
+        self.assertIn("EXDATE:20261102T140000Z", ics_utc)
+
+        # Floating rendering
+        csv_floating = (
+            "title,start,recurrence,exdate\n"
+            "Call,2026-10-26 09:00,FREQ=DAILY,2026-11-02\n"
+        )
+        ics_floating = render_ics(events_from(csv_floating))
+        self.assertIn("EXDATE:20261102T090000", ics_floating)
+
 
 # ---------------------------------------------------------------------------
 # Validation reporting
@@ -417,6 +511,18 @@ class TestValidation(unittest.TestCase):
         rows = make_rows("title,start\nA,2026-10-23 10:00\n\n\n")
         self.assertEqual(len(rows), 1)
 
+    def test_unparseable_exdate_reported(self):
+        events = events_from("title,start,exdate\nStandup,2026-10-26 09:00,not-a-date\n")
+        problems = validate_events(events)
+        self.assertEqual(len(problems), 1)
+        self.assertEqual(problems[0][0], 2)
+        self.assertTrue(any("unparseable exdate" in e for e in problems[0][1]))
+
+    def test_summary_lists_exceptions(self):
+        csv = "title,start,recurrence,exdate\nStandup,2026-10-26 09:00,FREQ=DAILY,\"2026-11-02, 2026-11-09\"\n"
+        summary = format_summary(events_from(csv))
+        self.assertIn("exceptions: 2026-11-02, 2026-11-09", summary)
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -437,6 +543,17 @@ class TestCli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_csv(directory, "title,start\n,broken\n")
             self.assertEqual(main([path, "--check"]), 1)
+
+    def test_check_flags_unparseable_exdate(self):
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_csv(directory, "title,start,exdate\nStandup,2026-10-26 09:00,invalid-date\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                exit_code = main([path, "--check"])
+            self.assertEqual(exit_code, 1)
+            output = buf.getvalue()
+            self.assertIn("row 2: unparseable exdate", output)
 
     def test_convert_writes_file(self):
         with tempfile.TemporaryDirectory() as directory:
