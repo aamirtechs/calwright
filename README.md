@@ -1,4 +1,5 @@
 # calwright
+**Live tool:** https://aamirtechs.github.io/calwright/ (runs in your browser, no install)
 
 [![GitHub stars](https://img.shields.io/github/stars/aamirtechs/calwright?style=social)](https://github.com/aamirtechs/calwright/stargazers) [![GitHub forks](https://img.shields.io/github/forks/aamirtechs/calwright?style=social)](https://github.com/aamirtechs/calwright/network/members) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/aamirtechs/calwright/blob/main/LICENSE) [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/aamirtechs/calwright/issues)
 

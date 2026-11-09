@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>calwright</title>
+<style>
+*{box-sizing:border-box} body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#f6f8fb;color:#17233b}
+header{background:#0b1f3a;color:#fff;padding:28px 20px;border-bottom:4px solid #d4a72c}
+header .wrap, main{max-width:900px;margin:0 auto}
+header h1{margin:0 0 6px;font-size:28px} header p{margin:0;color:#cfd9e8}
+main{padding:22px 16px 40px}
+.card{background:#fff;border-radius:12px;padding:20px;box-shadow:0 2px 10px rgba(11,31,58,.08)}
+label{font-weight:600;display:block;margin:14px 0 6px}
+textarea{width:100%;min-height:170px;padding:10px;border:1px solid #c9d3e0;border-radius:8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+input[type=text],input[type=number],input[type=date],select{padding:8px 10px;border:1px solid #c9d3e0;border-radius:8px;max-width:100%}
+.row{display:flex;flex-wrap:wrap;gap:14px} .row>div{flex:1 1 180px}
+button{background:#0b1f3a;color:#fff;border:0;border-radius:8px;padding:10px 18px;cursor:pointer;font-size:15px}
+button.accent{background:#d4a72c;color:#17233b;font-weight:700}
+button.secondary{background:#e7edf5;color:#0b1f3a}
+.btns{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+pre{background:#0b1f3a;color:#eef3fa;border-radius:10px;padding:16px;overflow:auto;white-space:pre-wrap;min-height:120px;font-size:13px}
+footer{max-width:900px;margin:0 auto;padding:0 16px 30px;color:#5a6a82;font-size:14px}
+a{color:#0b1f3a}
+.note{color:#5a6a82;font-size:13px}
+</style>
+</head>
+<body>
+<header><div class="wrap"><h1>calwright</h1><p>Turn a CSV file into a valid RFC 5545 .ics calendar, with a built-in validator that audits your CSV first.</p></div></header>
+<main>
+<div class="card">
+<label for="file">Choose a CSV file</label>
+<input type="file" id="file">
+<label for="input">CSV input</label>
+<textarea id="input" placeholder="Paste CSV here, choose a file, or load the sample."></textarea>
+<div class="row">
+<div><label for="defaulttz">Default timezone (CLI --default-tz, IANA name)</label><input type="text" id="defaulttz" placeholder="America/New_York"></div>
+<div><label for="outname">Output file name shown in the report</label><input type="text" id="outname" value="events.ics"></div>
+<div><label><input type="checkbox" id="utc"> Convert to UTC (CLI --utc)</label></div>
+<div><label><input type="checkbox" id="check"> Check only (CLI --check)</label></div>
+<div><label><input type="checkbox" id="summary" checked> Print summary (CLI --summary)</label></div>
+</div>
+<div class="btns">
+<button class="accent" id="run">Run</button>
+<button class="secondary" id="sample">Load sample</button>
+<button class="secondary" id="download">Download .ics calendar</button>
+<button class="secondary" id="downloadReport">Download report</button>
+</div>
+<label for="output">Report (same text as the CLI prints)</label>
+<pre id="output">Press Run to see the report. The calendar file is offered through Download .ics calendar.</pre>
+</div>
+</main>
+<footer>
+<p>Built by AamirTechs. <a href="https://aamirtechs.github.io/">All tools</a> | <a href="https://github.com/aamirtechs/calwright">Source</a></p>
+<p>Privacy: this tool runs 100% in your browser, nothing is uploaded.</p>
+</footer>
+<script id="core">
+var PRODID = "-//calwright//calwright 1.0.0//EN";
+var COLUMN_ALIASES = {
+  title: ["title","summary","event","name","subject"],
+  start: ["start","start_time","starttime","begin","dtstart","date"],
+  end: ["end","end_time","endtime","finish","dtend"],
+  duration: ["duration","length"],
+  description: ["description","desc","details","notes"],
+  location: ["location","place","venue","where"],
+  timezone: ["timezone","tzid","tz","time_zone"],
+  recurrence: ["recurrence","rrule","repeat","repeats"],
+  uid: ["uid","id","event_id"],
+  allday: ["allday","all_day","all-day","full_day","fullday"],
+  exdate: ["exdate","exception","exceptions","exception_date","exclude","skip"]
+};
+function pyRepr(s){
+  s = String(s);
+  var hasSingle = s.indexOf("'")>=0, hasDouble = s.indexOf('"')>=0;
+  var q = (hasSingle && !hasDouble) ? '"' : "'";
+  var out = s.replace(/\\/g, "\\\\");
+  if(q==="'") out = out.replace(/'/g, "\\'");
+  else out = out.replace(/"/g, '\\"');
+  return q + out + q;
+}
+function normalizeHeaders(headers){
+  var mapping = {};
+  headers.forEach(function(header){
+    var key = header.trim().toLowerCase().replace(/ /g, "_");
+    var canonical = null;
+    for(var canon in COLUMN_ALIASES){
+      if(COLUMN_ALIASES[canon].indexOf(key) >= 0){ canonical = canon; break; }
+    }
+    mapping[header] = canonical;
+  });
+  return mapping;
+}
+function parseCsvWithDelim(text, delim){
+  var rows = [], row = [], field = "", inQ = false, rowStarted = false, i = 0;
+  function endField(){ row.push(field); field = ""; }
+  function endRow(){ endField(); rows.push(row); row = []; rowStarted = false; }
+  while(i < text.length){
+    var c = text[i];
+    if(inQ){
+      if(c === "\""){ if(text[i+1] === "\""){ field += "\""; i += 2; continue; } inQ = false; i++; continue; }
+      field += c; i++; continue;
+    }
+    if(c === "\"" && field === ""){ inQ = true; rowStarted = true; i++; continue; }
+    if(c === delim){ endField(); rowStarted = true; i++; continue; }
+    if(c === "\r"){ if(text[i+1] === "\n") i++; endRow(); i++; continue; }
+    if(c === "\n"){ endRow(); i++; continue; }
+    field += c; rowStarted = true; i++;
+  }
+  if(rowStarted || field !== "" || row.length > 0){ endField(); rows.push(row); }
+  return rows;
+}
+function sniffDelim(text){
+  var candidates = [",", "\t", ";", "|"];
+  var best = null, bestScore = 0;
+  for(var ci=0; ci<candidates.length; ci++){
+    var delim = candidates[ci];
+    var parsed = parseCsvWithDelim(text.slice(0, 8192), delim);
+    var counts = [];
+    for(var r=0; r<parsed.length && counts.length<8; r++){ if(parsed[r].length) counts.push(parsed[r].length); }
+    if(!counts.length) continue;
+    var first = counts[0], consistent = counts.every(function(n){ return n === first; });
+    var score = (consistent && first > 1) ? first : 0;
+    if(score > bestScore){ bestScore = score; best = delim; }
+  }
+  return best || ",";
+}
+function loadRows(csvText){
+  if(csvText.charCodeAt(0) === 0xFEFF) csvText = csvText.slice(1);
+  var delim = sniffDelim(csvText);
+  var rawRows = parseCsvWithDelim(csvText, delim).filter(function(r){ return r.length > 0; });
+  if(!rawRows.length) throw new Error("no header row found in CSV");
+  var fieldnames = rawRows[0];
+  var mapping = normalizeHeaders(fieldnames);
+  var rows = [];
+  for(var idx=1; idx<rawRows.length; idx++){
+    var raw = rawRows[idx];
+    var allEmpty = raw.every(function(v){ return (v || "").trim() === ""; });
+    if(allEmpty) continue;
+    var normalized = {};
+    for(var fi=0; fi<fieldnames.length; fi++){
+      var canonical = mapping[fieldnames[fi]];
+      if(canonical && !(canonical in normalized)) normalized[canonical] = fi < raw.length ? raw[fi] : "";
+    }
+    rows.push([idx + 1, normalized]);
+  }
+  return rows;
+}
+var MONTH_SHORT = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+var MONTH_FULL = {january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12};
+var DATETIME_FORMATS = [
+  "%Y-%m-%dT%H:%M:%S%z","%Y-%m-%dT%H:%M%z","%Y-%m-%dT%H:%M:%S","%Y-%m-%dT%H:%M",
+  "%Y-%m-%d %H:%M:%S%z","%Y-%m-%d %H:%M:%S","%Y-%m-%d %H:%M","%Y-%m-%d %H%M",
+  "%Y/%m/%d %H:%M:%S","%Y/%m/%d %H:%M","%Y/%m/%d","%m/%d/%Y %I:%M %p",
+  "%m/%d/%Y %I:%M:%S %p","%m/%d/%Y %H:%M","%m/%d/%Y","%m-%d-%Y %H:%M","%m-%d-%Y",
+  "%d %b %Y %H:%M","%d %b %Y","%b %d, %Y %H:%M","%b %d, %Y","%B %d, %Y %H:%M","%B %d, %Y",
+  "%Y-%m-%d","%Y%m%dT%H%M%S%z","%Y%m%dT%H%M%S","%Y%m%d"
+];
+function formatToRegex(fmt){
+  var re = "", i = 0, groups = [];
+  while(i < fmt.length){
+    var c = fmt[i];
+    if(c === "%" && i + 1 < fmt.length){
+      var t = fmt[i + 1];
+      if(t === "Y"){ re += "(\\d{4})"; groups.push("Y"); }
+      else if(t === "m"){ re += "(\\d{1,2})"; groups.push("m"); }
+      else if(t === "d"){ re += "(\\d{1,2})"; groups.push("d"); }
+      else if(t === "H"){ re += "(\\d{1,2})"; groups.push("H"); }
+      else if(t === "M"){ re += "(\\d{1,2})"; groups.push("M"); }
+      else if(t === "S"){ re += "(\\d{1,2})"; groups.push("S"); }
+      else if(t === "I"){ re += "(\\d{1,2})"; groups.push("I"); }
+      else if(t === "p"){ re += "([AaPp][Mm])"; groups.push("p"); }
+      else if(t === "b"){ re += "([A-Za-z]+)"; groups.push("b"); }
+      else if(t === "B"){ re += "([A-Za-z]+)"; groups.push("B"); }
+      else if(t === "z"){ re += "(Z|[+-]\\d{2}:?\\d{2}(?::?\\d{2}(?:\\.\\d+)?)?)"; groups.push("z"); }
+      else { re += "%" + t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+      i += 2;
+    } else if(c === " "){ re += "\\s+"; i += 1; }
+    else { re += c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); i += 1; }
+  }
+  return [new RegExp("^" + re + "$"), groups];
+}
+var FORMAT_RES = DATETIME_FORMATS.map(function(f){ var r = formatToRegex(f); return [f, r[0], r[1]]; });
+function daysInMonth(y, m){
+  var leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  return [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1];
+}
+function parseZOffset(z){
+  if(z === "Z" || z === "z") return 0;
+  var m = /^([+-])(\d{2}):?(\d{2})(?::?(\d{2})(?:\.\d+)?)?$/.exec(z);
+  if(!m) return null;
+  var sign = m[1] === "-" ? -1 : 1;
+  var totalSec = parseInt(m[2],10) * 3600 + parseInt(m[3],10) * 60 + (m[4] ? parseInt(m[4],10) : 0);
+  if(totalSec >= 86400) return null;
+  return sign * Math.round(totalSec / 60 * 1000) / 1000;
+}
+function parseDatetime(value){
+  var original = value;
+  value = value.trim();
+  if(!value) throw new Error("empty datetime");
+  var candidate = value;
+  if(candidate.endsWith("Z") || candidate.endsWith("z")) candidate = candidate.slice(0, -1) + "+0000";
+  candidate = candidate.replace(/(\.\d{6})\d+/, "$1");
+  for(var fi=0; fi<FORMAT_RES.length; fi++){
+    var fmt = FORMAT_RES[fi][0], re = FORMAT_RES[fi][1], groups = FORMAT_RES[fi][2];
+    var match = re.exec(candidate);
+    if(!match) continue;
+    var vals = {};
+    for(var gi=0; gi<groups.length; gi++) vals[groups[gi]] = match[gi + 1];
+    var year = parseInt(vals.Y, 10);
+    var month = vals.m !== undefined ? parseInt(vals.m, 10) : null;
+    if(vals.b !== undefined){ month = MONTH_SHORT[vals.b.toLowerCase()] || MONTH_FULL[vals.b.toLowerCase()] || null; if(month === null) continue; }
+    if(vals.B !== undefined){ month = MONTH_FULL[vals.B.toLowerCase()] || MONTH_SHORT[vals.B.toLowerCase()] || null; if(month === null) continue; }
+    var day = parseInt(vals.d, 10);
+    if(!(month >= 1 && month <= 12)) continue;
+    if(!(day >= 1 && day <= daysInMonth(year, month))) continue;
+    var hour = 0, minute = 0, second = 0;
+    if(vals.H !== undefined){ hour = parseInt(vals.H, 10); if(hour > 23) continue; }
+    if(vals.I !== undefined){
+      var h12 = parseInt(vals.I, 10);
+      if(h12 < 1 || h12 > 12) continue;
+      var p = (vals.p || "AM").toUpperCase();
+      hour = h12 % 12 + (p === "PM" ? 12 : 0);
+    }
+    if(vals.M !== undefined){ minute = parseInt(vals.M, 10); if(minute > 59) continue; }
+    if(vals.S !== undefined){ second = parseInt(vals.S, 10); if(second > 59) continue; }
+    var dateOnly = fmt.indexOf("%H") < 0 && fmt.indexOf("%I") < 0;
+    var dt;
+    if(vals.z !== undefined){
+      var offMin = parseZOffset(vals.z);
+      if(offMin === null) continue;
+      var utcMs = Date.UTC(year, month - 1, day, hour, minute, second) - Math.round(offMin * 60000);
+      dt = {type: "dt", aware: true, tzid: null, fixedOff: Math.round(offMin), utcAware: false, ms: utcMs};
+    } else {
+      dt = {type: "dt", aware: false, tzid: null, fixedOff: null, utcAware: false, ms: Date.UTC(year, month - 1, day, hour, minute, second)};
+    }
+    return [dt, dateOnly];
+  }
+  throw new Error("unrecognized datetime format: " + pyRepr(original));
+}
+function splitDateList(text){
+  var tokens = text.split(",").map(function(p){ return p.trim(); }).filter(function(p){ return p.length > 0; });
+  var items = [], i = 0;
+  while(i < tokens.length){
+    var candidate = tokens[i];
+    var ok = true;
+    try { parseDatetime(candidate); } catch(e){ ok = false; }
+    if(ok){ items.push(candidate); i += 1; continue; }
+    if(i + 1 < tokens.length){
+      var merged = candidate + ", " + tokens[i + 1];
+      var ok2 = true;
+      try { parseDatetime(merged); } catch(e){ ok2 = false; }
+      if(ok2){ items.push(merged); i += 2; continue; }
+    }
+    items.push(candidate); i += 1;
+  }
+  return items;
+}
+function isTrue(value){
+  return ["1","true","yes","y","all-day","allday","x"].indexOf(String(value).trim().toLowerCase()) >= 0;
+}
+function parseDuration(value){
+  value = value.trim();
+  if(!value) throw new Error("empty duration");
+  if(/^\d+$/.test(value)) return parseInt(value, 10) * 60000;
+  var m = /^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$/.exec(value.toUpperCase());
+  if(m && (m[1] || m[2] || m[3] || m[4])){
+    return ((parseInt(m[1] || 0, 10) * 24 + parseInt(m[2] || 0, 10)) * 60 + parseInt(m[3] || 0, 10)) * 60000 + parseInt(m[4] || 0, 10) * 1000;
+  }
+  var m2 = /^(?:(\d+)\s*h(?:ours?)?)?\s*(?:(\d+)\s*m(?:in(?:utes?)?)?)?\s*$/i.exec(value);
+  if(m2 && (m2[1] || m2[2])){
+    return (parseInt(m2[1] || 0, 10) * 60 + parseInt(m2[2] || 0, 10)) * 60000;
+  }
+  throw new Error("unrecognized duration: " + pyRepr(value));
+}
+var RRULE_KEYS = {FREQ:1,UNTIL:1,COUNT:1,INTERVAL:1,BYSECOND:1,BYMINUTE:1,BYHOUR:1,BYDAY:1,BYMONTHDAY:1,BYYEARDAY:1,BYWEEKNO:1,BYMONTH:1,BYSETPOS:1,WKST:1};
+var RRULE_FREQS = {SECONDLY:1,MINUTELY:1,HOURLY:1,DAILY:1,WEEKLY:1,MONTHLY:1,YEARLY:1};
+function validateRrule(value){
+  var problems = [];
+  value = value.trim();
+  if(!value) return ["empty RRULE"];
+  var upper = value.toUpperCase();
+  if(upper.indexOf("RRULE:") === 0) upper = upper.slice(6);
+  var parts = upper.split(";");
+  var seen = {};
+  for(var i=0;i<parts.length;i++){
+    var part = parts[i];
+    var eq = part.indexOf("=");
+    if(eq < 0){ problems.push("RRULE part " + pyRepr(part) + " is not KEY=VALUE"); continue; }
+    var key = part.slice(0, eq).trim(), val = part.slice(eq + 1).trim();
+    if(!RRULE_KEYS[key]){ problems.push("RRULE has unknown property " + pyRepr(key)); continue; }
+    if(key in seen) problems.push("RRULE repeats property " + pyRepr(key));
+    seen[key] = val;
+  }
+  if(!("FREQ" in seen)) problems.push("RRULE is missing required FREQ");
+  else if(!RRULE_FREQS[seen.FREQ]) problems.push("RRULE has invalid FREQ " + pyRepr(seen.FREQ));
+  if("COUNT" in seen){ if(!/^\d+$/.test(seen.COUNT) || parseInt(seen.COUNT, 10) < 1) problems.push("RRULE COUNT must be a positive integer"); }
+  if("INTERVAL" in seen){ if(!/^\d+$/.test(seen.INTERVAL) || parseInt(seen.INTERVAL, 10) < 1) problems.push("RRULE INTERVAL must be a positive integer"); }
+  if("UNTIL" in seen){
+    try { parseDatetime(seen.UNTIL); } catch(e){ problems.push("RRULE UNTIL is not a valid date/datetime: " + pyRepr(seen.UNTIL)); }
+  }
+  if("BYDAY" in seen){
+    var days = seen.BYDAY.split(",");
+    for(var d=0;d<days.length;d++){
+      if(!/^[+-]?\d{0,2}(MO|TU|WE|TH|FR|SA|SU)$/.test(days[d])) problems.push("RRULE BYDAY has invalid value " + pyRepr(days[d]));
+    }
+  }
+  if("COUNT" in seen && "UNTIL" in seen) problems.push("RRULE must not set both COUNT and UNTIL");
+  return problems;
+}
+var tzFormatters = {};
+function tzFormatter(tz){
+  if(!tzFormatters[tz]){
+    tzFormatters[tz] = new Intl.DateTimeFormat("en-US", {timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"});
+  }
+  return tzFormatters[tz];
+}
+function isValidTz(tz){
+  try { tzFormatter(tz); return true; } catch(e){ return false; }
+}
+function tzParts(tz, utcMs){
+  var parts = tzFormatter(tz).formatToParts(new Date(utcMs));
+  var out = {};
+  parts.forEach(function(p){ out[p.type] = p.value; });
+  var h = parseInt(out.hour, 10);
+  if(h === 24) h = 0;
+  return {y: parseInt(out.year, 10), mo: parseInt(out.month, 10), d: parseInt(out.day, 10), h: h, mi: parseInt(out.minute, 10), s: parseInt(out.second, 10)};
+}
+function tzOffsetMs(tz, utcMs){
+  var p = tzParts(tz, utcMs);
+  return Date.UTC(p.y, p.mo - 1, p.d, p.h, p.mi, p.s) - Math.floor(utcMs / 1000) * 1000;
+}
+function wallToUtc(tz, wallMs){
+  var off = tzOffsetMs(tz, wallMs);
+  var utc = wallMs - off;
+  var off2 = tzOffsetMs(tz, utc);
+  if(off2 !== off){
+    utc = wallMs - off2;
+    var off3 = tzOffsetMs(tz, utc);
+    if(off3 !== off2) utc = wallMs - off3;
+  }
+  return utc;
+}
+function wallMsOf(dt){
+  if(dt.tzid) return dt.ms + tzOffsetMs(dt.tzid, dt.ms);
+  if(dt.aware && !dt.utcAware && dt.fixedOff !== null) return dt.ms + dt.fixedOff * 60000;
+  return dt.ms;
+}
+function componentsOfMs(ms){
+  var d = new Date(ms);
+  return {y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes(), s: d.getUTCSeconds()};
+}
+function fmtOffsetMin(offMin){
+  var sign = offMin < 0 ? "-" : "+";
+  var a = Math.abs(offMin);
+  var hh = Math.floor(a / 60), mm = a % 60;
+  return sign + (hh < 10 ? "0" : "") + hh + ":" + (mm < 10 ? "0" : "") + mm;
+}
+function isoformatDt(dt){
+  var c = componentsOfMs(wallMsOf(dt));
+  function p2(v){ return (v < 10 ? "0" : "") + v; }
+  var base = c.y + "-" + p2(c.mo) + "-" + p2(c.d) + "T" + p2(c.h) + ":" + p2(c.mi) + ":" + p2(c.s);
+  if(dt.tzid) return base + fmtOffsetMin(Math.round(tzOffsetMs(dt.tzid, dt.ms) / 60000));
+  if(dt.utcAware) return base + "+00:00";
+  if(dt.aware && dt.fixedOff !== null) return base + fmtOffsetMin(dt.fixedOff);
+  return base;
+}
+function isoformatDate(dateVal){
+  function p2(v){ return (v < 10 ? "0" : "") + v; }
+  return dateVal.y + "-" + p2(dateVal.mo) + "-" + p2(dateVal.d);
+}
+function dateOfDt(dt){
+  var c = componentsOfMs(wallMsOf(dt));
+  return {type: "date", y: c.y, mo: c.mo, d: c.d};
+}
+function datePlusDays(dateVal, days){
+  var c = componentsOfMs(Date.UTC(dateVal.y, dateVal.mo - 1, dateVal.d) + days * 86400000);
+  return {type: "date", y: c.y, mo: c.mo, d: c.d};
+}
+function addMsToDt(dt, deltaMs){
+  if(dt.tzid){
+    var newWall = wallMsOf(dt) + deltaMs;
+    return {type: "dt", aware: true, tzid: dt.tzid, fixedOff: null, utcAware: false, ms: wallToUtc(dt.tzid, newWall)};
+  }
+  return {type: "dt", aware: dt.aware, tzid: null, fixedOff: dt.fixedOff, utcAware: dt.utcAware, ms: dt.ms + deltaMs};
+}
+function attachTz(dt, tzid){
+  return {type: "dt", aware: true, tzid: tzid, fixedOff: null, utcAware: false, ms: wallToUtc(tzid, dt.ms)};
+}
+function astimezoneTz(dt, tzid){
+  return {type: "dt", aware: true, tzid: tzid, fixedOff: null, utcAware: false, ms: dt.ms};
+}
+function toUtcDt(dt){
+  return {type: "dt", aware: true, tzid: null, fixedOff: null, utcAware: true, ms: dt.ms};
+}
+function compareVals(a, b){
+  var am = a.type === "date" ? Date.UTC(a.y, a.mo - 1, a.d) : a.ms;
+  var bm = b.type === "date" ? Date.UTC(b.y, b.mo - 1, b.d) : b.ms;
+  if(am < bm) return -1;
+  if(am > bm) return 1;
+  return 0;
+}
+function resolveTzid(value, defaultTz){
+  var raw = (value || "").trim();
+  if(!raw && defaultTz) raw = defaultTz;
+  if(!raw) return [null, null];
+  if(!isValidTz(raw)) return [null, "unknown timezone " + pyRepr(raw)];
+  return [raw, null];
+}
+function sha1Bytes(data){
+  function rol(v, n){ return (v << n) | (v >>> (32 - n)); }
+  var ml = data.length;
+  var bitLenHi = Math.floor(ml / 536870912), bitLenLo = (ml * 8) >>> 0;
+  var withPad = [];
+  for(var i=0;i<ml;i++) withPad.push(data[i]);
+  withPad.push(0x80);
+  while(withPad.length % 64 !== 56) withPad.push(0);
+  withPad.push((bitLenHi >>> 24) & 255, (bitLenHi >>> 16) & 255, (bitLenHi >>> 8) & 255, bitLenHi & 255);
+  withPad.push((bitLenLo >>> 24) & 255, (bitLenLo >>> 16) & 255, (bitLenLo >>> 8) & 255, bitLenLo & 255);
+  var h0 = 0x67452301 | 0, h1 = 0xEFCDAB89 | 0, h2 = 0x98BADCFE | 0, h3 = 0x10325476 | 0, h4 = 0xC3D2E1F0 | 0;
+  var w = new Array(80);
+  for(var block=0; block<withPad.length; block += 64){
+    for(var t=0;t<16;t++){
+      w[t] = (withPad[block + t*4] << 24) | (withPad[block + t*4 + 1] << 16) | (withPad[block + t*4 + 2] << 8) | withPad[block + t*4 + 3];
+    }
+    for(var t2=16;t2<80;t2++) w[t2] = rol(w[t2-3] ^ w[t2-8] ^ w[t2-14] ^ w[t2-16], 1);
+    var a = h0, b = h1, c = h2, d = h3, e = h4;
+    for(var r=0;r<80;r++){
+      var f, k;
+      if(r < 20){ f = (b & c) | (~b & d); k = 0x5A827999; }
+      else if(r < 40){ f = b ^ c ^ d; k = 0x6ED9EBA1; }
+      else if(r < 60){ f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDC; }
+      else { f = b ^ c ^ d; k = 0xCA62C1D6; }
+      var tmp = (rol(a, 5) + f + e + k + w[r]) | 0;
+      e = d; d = c; c = rol(b, 30); b = a; a = tmp;
+    }
+    h0 = (h0 + a) | 0; h1 = (h1 + b) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0; h4 = (h4 + e) | 0;
+  }
+  var out = [];
+  [h0, h1, h2, h3, h4].forEach(function(h){
+    out.push((h >>> 24) & 255, (h >>> 16) & 255, (h >>> 8) & 255, h & 255);
+  });
+  return out;
+}
+var NS_URL_BYTES = [0x6b,0xa7,0xb8,0x11,0x9d,0xad,0x11,0xd1,0x80,0xb4,0x00,0xc0,0x4f,0xd4,0x30,0xc8];
+function uuid5(name){
+  var nameBytes = Array.from(new TextEncoder().encode(name));
+  var hash = sha1Bytes(NS_URL_BYTES.concat(nameBytes));
+  var b = hash.slice(0, 16);
+  b[6] = (b[6] & 0x0f) | 0x50;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  var hex = b.map(function(x){ var s = x.toString(16); return s.length < 2 ? "0" + s : s; });
+  return hex.slice(0,4).join("") + "-" + hex.slice(4,6).join("") + "-" + hex.slice(6,8).join("") + "-" + hex.slice(8,10).join("") + "-" + hex.slice(10,16).join("");
+}
+function uuid4Random(){
+  var b = [];
+  for(var i=0;i<16;i++) b.push(Math.floor(Math.random() * 256));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  var hex = b.map(function(x){ var s = x.toString(16); return s.length < 2 ? "0" + s : s; });
+  return hex.slice(0,4).join("") + "-" + hex.slice(4,6).join("") + "-" + hex.slice(6,8).join("") + "-" + hex.slice(8,10).join("") + "-" + hex.slice(10,16).join("");
+}
+function buildEvents(rows, defaultTz, convertToUtc){
+  var events = [];
+  for(var ri=0; ri<rows.length; ri++){
+    var rowNumber = rows[ri][0], row = rows[ri][1];
+    var errors = [];
+    var title = (row.title || "").trim();
+    if(!title) errors.push("missing title");
+    var startRaw = (row.start || "").trim();
+    var start = null, startDateOnly = false;
+    if(!startRaw) errors.push("missing start");
+    else {
+      try { var ps = parseDatetime(startRaw); start = ps[0]; startDateOnly = ps[1]; }
+      catch(e){ errors.push("unparseable start: " + e.message); }
+    }
+    var endRaw = (row.end || "").trim();
+    var durationRaw = (row.duration || "").trim();
+    var end = null;
+    if(endRaw){
+      try { end = parseDatetime(endRaw)[0]; }
+      catch(e){ errors.push("unparseable end: " + e.message); }
+    } else if(durationRaw && start !== null){
+      try { end = addMsToDt(start, parseDuration(durationRaw)); }
+      catch(e){ errors.push("unparseable duration: " + e.message); }
+    }
+    var exdateRaw = (row.exdate || "").trim();
+    var rawExdates = [];
+    if(exdateRaw){
+      splitDateList(exdateRaw).forEach(function(item){
+        try { var px = parseDatetime(item); rawExdates.push({dt: px[0], dateOnly: px[1]}); }
+        catch(e){ errors.push("unparseable exdate: " + e.message); }
+      });
+    }
+    var allDay = isTrue(row.allday || "") || (startDateOnly && !endRaw && !durationRaw);
+    if(allDay && start !== null && start.type === "dt") start = dateOfDt(start);
+    if(allDay && end !== null && end.type === "dt") end = dateOfDt(end);
+    if(start !== null && end !== null && compareVals(end, start) < 0) errors.push("end is before start");
+    if(start === null){}
+    else if(allDay){
+      if(end === null && start.type === "date") end = datePlusDays(start, 1);
+    } else {
+      if(end === null) end = addMsToDt(start, 3600000);
+    }
+    var tzid = null;
+    var eventTz = null, startTzAttached = null;
+    if(!allDay && start !== null && start.type === "dt"){
+      var resolved = resolveTzid(row.timezone, defaultTz);
+      tzid = resolved[0];
+      var tzError = resolved[1];
+      if(tzError) errors.push(tzError);
+      else if(tzid){
+        eventTz = tzid;
+        if(!start.aware) start = attachTz(start, tzid);
+        else start = astimezoneTz(start, tzid);
+        if(end !== null){
+          if(!end.aware) end = attachTz(end, tzid);
+          else end = astimezoneTz(end, tzid);
+        }
+        startTzAttached = start;
+        if(convertToUtc){
+          start = toUtcDt(start);
+          if(end !== null) end = toUtcDt(end);
+          tzid = null;
+        }
+      }
+    }
+    var exdates = [];
+    for(var xi=0; xi<rawExdates.length; xi++){
+      var rawEx = rawExdates[xi];
+      if(allDay){ exdates.push(dateOfDt(rawEx.dt)); continue; }
+      var ex;
+      if(rawEx.dateOnly){
+        var exWall = componentsOfMs(wallMsOf(rawEx.dt));
+        var ref = startTzAttached || start;
+        if(ref !== null && ref.type === "dt"){
+          var refC = componentsOfMs(wallMsOf(ref));
+          var combinedWall = Date.UTC(exWall.y, exWall.mo - 1, exWall.d, refC.h, refC.mi, refC.s);
+          if(ref.tzid) ex = {type: "dt", aware: true, tzid: ref.tzid, fixedOff: null, utcAware: false, ms: wallToUtc(ref.tzid, combinedWall)};
+          else if(ref.utcAware) ex = {type: "dt", aware: true, tzid: null, fixedOff: null, utcAware: true, ms: combinedWall};
+          else if(ref.aware && ref.fixedOff !== null) ex = {type: "dt", aware: true, tzid: null, fixedOff: ref.fixedOff, utcAware: false, ms: combinedWall - ref.fixedOff * 60000};
+          else ex = {type: "dt", aware: false, tzid: null, fixedOff: null, utcAware: false, ms: combinedWall};
+        } else {
+          ex = {type: "dt", aware: false, tzid: null, fixedOff: null, utcAware: false, ms: Date.UTC(exWall.y, exWall.mo - 1, exWall.d, 0, 0, 0)};
+        }
+        if(convertToUtc && ex.aware) ex = toUtcDt(ex);
+      } else {
+        ex = rawEx.dt;
+        if(eventTz){
+          if(!ex.aware) ex = attachTz(ex, eventTz);
+          else ex = astimezoneTz(ex, eventTz);
+        }
+        if(convertToUtc && ex.aware) ex = toUtcDt(ex);
+      }
+      exdates.push(ex);
+    }
+    var rruleRaw = (row.recurrence || "").trim();
+    var rrule = "";
+    if(rruleRaw){
+      var problems = validateRrule(rruleRaw);
+      if(problems.length) problems.forEach(function(p){ errors.push("bad RRULE: " + p); });
+      else {
+        rrule = rruleRaw.toUpperCase();
+        if(rrule.indexOf("RRULE:") === 0) rrule = rrule.slice(6);
+      }
+    }
+    var uid = (row.uid || "").trim();
+    if(!uid && title && start !== null){
+      var startIso = start.type === "date" ? isoformatDate(start) : isoformatDt(start);
+      uid = uuid5("calwright:" + title + "|" + startIso + "|" + (tzid || "")) + "@calwright";
+    } else if(!uid){
+      uid = uuid4Random() + "@calwright";
+    }
+    events.push({
+      rowNumber: rowNumber, title: title, start: start, end: end,
+      description: (row.description || "").trim(), location: (row.location || "").trim(),
+      tzid: tzid, rrule: rrule, uid: uid, allDay: allDay, exdates: exdates, errors: errors,
+      ok: errors.length === 0
+    });
+  }
+  return events;
+}
+function escapeText(value){
+  return value.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r\n/g, "\\n").replace(/\n/g, "\\n").replace(/\r/g, "\\n");
+}
+function foldLine(line){
+  var encoded = new TextEncoder().encode(line);
+  if(encoded.length <= 75) return line;
+  var chunks = [];
+  var bytes = Array.from(encoded);
+  while(bytes.length > 75){
+    var cut = 75;
+    while(cut > 0 && (bytes[cut] & 0xC0) === 0x80) cut -= 1;
+    chunks.push(new TextDecoder("utf-8").decode(new Uint8Array(bytes.slice(0, cut))));
+    bytes = bytes.slice(cut);
+  }
+  chunks.push(new TextDecoder("utf-8").decode(new Uint8Array(bytes)));
+  return chunks.join("\r\n ");
+}
+function contentLine(name, value, params){
+  var head = name;
+  if(params){ for(var k in params) head += ";" + k + "=" + params[k]; }
+  return foldLine(head + ":" + value);
+}
+function formatIcsLocal(dt){
+  var c = componentsOfMs(wallMsOf(dt));
+  function p2(v){ return (v < 10 ? "0" : "") + v; }
+  return "" + c.y + p2(c.mo) + p2(c.d) + "T" + p2(c.h) + p2(c.mi) + p2(c.s);
+}
+function formatDatetimeIcs(dt){
+  if(dt.aware){
+    var c = componentsOfMs(dt.ms);
+    function p2(v){ return (v < 10 ? "0" : "") + v; }
+    return "" + c.y + p2(c.mo) + p2(c.d) + "T" + p2(c.h) + p2(c.mi) + p2(c.s) + "Z";
+  }
+  return formatIcsLocal(dt);
+}
+function formatOffsetColonless(offSec){
+  var sign = offSec >= 0 ? "+" : "-";
+  var a = Math.abs(offSec);
+  var hh = Math.floor(a / 3600), mm = Math.floor((a % 3600) / 60);
+  return sign + (hh < 10 ? "0" : "") + hh + (mm < 10 ? "0" : "") + mm;
+}
+function nthWeekdayOfMonth(y, mo, d){
+  var dow = (new Date(Date.UTC(y, mo - 1, d)).getUTCDay() + 6) % 7;
+  var firstDow = (new Date(Date.UTC(y, mo - 1, 1)).getUTCDay() + 6) % 7;
+  var delta = (dow - firstDow + 7) % 7;
+  var firstOcc = 1 + delta;
+  var n = Math.floor((d - firstOcc) / 7) + 1;
+  var following = new Date(Date.UTC(y, mo - 1, d) + 7 * 86400000);
+  if(following.getUTCMonth() !== mo - 1) n = 5;
+  return [n, ["MO","TU","WE","TH","FR","SA","SU"][dow]];
+}
+function offsetsForYear(tzid, year){
+  var out = [];
+  var dayMs = Date.UTC(year, 0, 1);
+  while(true){
+    var c = componentsOfMs(dayMs);
+    if(c.y !== year) break;
+    var noon = Date.UTC(c.y, c.mo - 1, c.d, 12, 0, 0);
+    out.push([{y: c.y, mo: c.mo, d: c.d}, Math.round(tzOffsetMs(tzid, noon) / 1000)]);
+    dayMs += 86400000;
+  }
+  return out;
+}
+function buildVtimezone(tzid, referenceYear){
+  var lines = ["BEGIN:VTIMEZONE", "TZID:" + tzid];
+  var years = [referenceYear - 1, referenceYear, referenceYear + 1, referenceYear + 2];
+  var transitions = [], prevOffset = null;
+  for(var yi=0; yi<years.length; yi++){
+    var offs = offsetsForYear(tzid, years[yi]);
+    for(var oi=0; oi<offs.length; oi++){
+      var day = offs[oi][0], offset = offs[oi][1];
+      if(prevOffset !== null && offset !== prevOffset){
+        transitions.push([{y: day.y, mo: day.mo, d: day.d}, prevOffset, offset]);
+      }
+      prevOffset = offset;
+    }
+  }
+  if(!transitions.length){
+    var offsetNow = Math.round(tzOffsetMs(tzid, Date.now()) / 1000);
+    lines.push("BEGIN:STANDARD");
+    lines.push("DTSTART:19700101T000000");
+    lines.push("TZOFFSETFROM:" + formatOffsetColonless(offsetNow));
+    lines.push("TZOFFSETTO:" + formatOffsetColonless(offsetNow));
+    lines.push("END:STANDARD");
+  } else {
+    var byKind = {DAYLIGHT: [], STANDARD: []};
+    transitions.forEach(function(tr){
+      var kind = tr[2] > tr[1] ? "DAYLIGHT" : "STANDARD";
+      byKind[kind].push(tr);
+    });
+    ["STANDARD", "DAYLIGHT"].forEach(function(kind){
+      var group = byKind[kind];
+      if(!group.length) return;
+      var tr = group[Math.floor(group.length / 2)];
+      var at = tr[0];
+      var nw = nthWeekdayOfMonth(at.y, at.mo, at.d);
+      var byday = (nw[0] === 5 ? "-1" : String(nw[0])) + nw[1];
+      function p2(v){ return (v < 10 ? "0" : "") + v; }
+      lines.push("BEGIN:" + kind);
+      lines.push("DTSTART:" + at.y + p2(at.mo) + p2(at.d) + "T020000");
+      lines.push("RRULE:FREQ=YEARLY;BYMONTH=" + at.mo + ";BYDAY=" + byday);
+      lines.push("TZOFFSETFROM:" + formatOffsetColonless(tr[1]));
+      lines.push("TZOFFSETTO:" + formatOffsetColonless(tr[2]));
+      lines.push("END:" + kind);
+    });
+  }
+  lines.push("END:VTIMEZONE");
+  return lines.map(function(l){ return foldLine(l); }).join("\r\n");
+}
+function formatPropDatetime(name, dt, allDay, tzid){
+  if(allDay){
+    var dd = dt.type === "date" ? dt : dateOfDt(dt);
+    function p2d(v){ return (v < 10 ? "0" : "") + v; }
+    return contentLine(name, "" + dd.y + p2d(dd.mo) + p2d(dd.d), {VALUE: "DATE"});
+  }
+  if(tzid) return contentLine(name, formatIcsLocal(dt), {TZID: tzid});
+  return contentLine(name, formatDatetimeIcs(dt));
+}
+function renderIcs(events){
+  var now = new Date();
+  function p2(v){ return (v < 10 ? "0" : "") + v; }
+  var stamp = "" + now.getUTCFullYear() + p2(now.getUTCMonth() + 1) + p2(now.getUTCDate()) + "T" + p2(now.getUTCHours()) + p2(now.getUTCMinutes()) + p2(now.getUTCSeconds()) + "Z";
+  var lines = ["BEGIN:VCALENDAR", "PRODID:" + PRODID, "VERSION:2.0", "CALSCALE:GREGORIAN", "METHOD:PUBLISH"];
+  var tzidSet = {};
+  events.forEach(function(e){ if(e.tzid && e.ok) tzidSet[e.tzid] = 1; });
+  var tzids = Object.keys(tzidSet).sort();
+  if(tzids.length){
+    var years = [];
+    events.forEach(function(e){ if(e.start && e.start.type === "dt") years.push(componentsOfMs(wallMsOf(e.start)).y); });
+    var referenceYear = years.length ? Math.max.apply(null, years) : new Date().getFullYear();
+    tzids.forEach(function(tzid){ lines.push(buildVtimezone(tzid, referenceYear)); });
+  }
+  events.forEach(function(event){
+    if(!event.ok || event.start === null) return;
+    lines.push("BEGIN:VEVENT");
+    lines.push(contentLine("UID", event.uid));
+    lines.push(contentLine("DTSTAMP", stamp));
+    lines.push(contentLine("SUMMARY", escapeText(event.title)));
+    if(event.allDay){
+      var sd = event.start.type === "date" ? event.start : dateOfDt(event.start);
+      function p2d(v){ return (v < 10 ? "0" : "") + v; }
+      lines.push(contentLine("DTSTART", "" + sd.y + p2d(sd.mo) + p2d(sd.d), {VALUE: "DATE"}));
+      if(event.end){
+        var ed = event.end.type === "date" ? event.end : dateOfDt(event.end);
+        lines.push(contentLine("DTEND", "" + ed.y + p2d(ed.mo) + p2d(ed.d), {VALUE: "DATE"}));
+      }
+    } else if(event.tzid){
+      lines.push(contentLine("DTSTART", formatIcsLocal(event.start), {TZID: event.tzid}));
+      if(event.end) lines.push(contentLine("DTEND", formatIcsLocal(event.end), {TZID: event.tzid}));
+    } else {
+      lines.push(contentLine("DTSTART", formatDatetimeIcs(event.start)));
+      if(event.end) lines.push(contentLine("DTEND", formatDatetimeIcs(event.end)));
+    }
+    if(event.description) lines.push(contentLine("DESCRIPTION", escapeText(event.description)));
+    if(event.location) lines.push(contentLine("LOCATION", escapeText(event.location)));
+    if(event.rrule) lines.push(contentLine("RRULE", event.rrule));
+    (event.exdates || []).forEach(function(ex){ lines.push(formatPropDatetime("EXDATE", ex, event.allDay, event.tzid)); });
+    lines.push("END:VEVENT");
+  });
+  lines.push("END:VCALENDAR");
+  return lines.join("\r\n") + "\r\n";
+}
+function validateEvents(events){
+  return events.filter(function(e){ return !e.ok; }).map(function(e){ return [e.rowNumber, e.errors]; });
+}
+function formatCheckReport(problems, totalRows){
+  var out = ["calwright check: " + totalRows + " row(s) examined"];
+  if(!problems.length){
+    out.push("OK: no problems found.");
+    return out.join("\n");
+  }
+  var total = problems.reduce(function(a, p){ return a + p[1].length; }, 0);
+  out.push("FOUND " + total + " problem(s):");
+  problems.forEach(function(p){
+    p[1].forEach(function(err){ out.push("  row " + p[0] + ": " + err); });
+  });
+  return out.join("\n");
+}
+function formatSummary(events){
+  var out = ["calwright preview: " + events.length + " event(s)"];
+  events.forEach(function(event){
+    if(!event.ok || event.start === null){
+      out.push("  [row " + event.rowNumber + "] INVALID: " + event.errors.join("; "));
+      return;
+    }
+    var when;
+    if(event.allDay){
+      var sd = event.start.type === "date" ? event.start : dateOfDt(event.start);
+      when = isoformatDate(sd);
+      if(event.end){
+        var ed = event.end.type === "date" ? event.end : dateOfDt(event.end);
+        when += " to " + isoformatDate(datePlusDays(ed, -1)) + " (all day)";
+      }
+    } else {
+      when = isoformatDt(event.start);
+      if(event.end) when += " to " + isoformatDt(event.end);
+    }
+    var line = "  - " + event.title + " | " + when;
+    if(event.location) line += " | " + event.location;
+    if(event.rrule) line += " | repeats: " + event.rrule;
+    if(event.exdates && event.exdates.length){
+      var fmtd = event.exdates.map(function(ex){
+        if(ex.type === "date") return isoformatDate(ex);
+        var c = componentsOfMs(wallMsOf(ex));
+        function p2e(v){ return (v < 10 ? "0" : "") + v; }
+        return c.y + "-" + p2e(c.mo) + "-" + p2e(c.d);
+      });
+      line += " | exceptions: " + fmtd.join(", ");
+    }
+    out.push(line);
+  });
+  return out.join("\n");
+}
+window.runTool = function(inputText, options){
+  options = options || {};
+  var csvText = String(inputText == null ? "" : inputText);
+  if(!csvText.trim()){
+    window.__dl = null;
+    return "calwright: input is empty";
+  }
+  var rows;
+  try { rows = loadRows(csvText); }
+  catch(e){ window.__dl = null; return "calwright: " + e.message; }
+  var events = buildEvents(rows, options.defaultTz || null, !!options.utc);
+  var problems = validateEvents(events);
+  if(options.check){
+    window.__dl = null;
+    return formatCheckReport(problems, rows.length);
+  }
+  if(problems.length){
+    window.__dl = null;
+    return formatCheckReport(problems, rows.length) + "\ncalwright: fix the problems above or run with --check for details";
+  }
+  var outParts = [];
+  if(options.summary !== false) outParts.push(formatSummary(events));
+  var icsText = renderIcs(events);
+  var outName = options.outputName || "events.ics";
+  window.__dl = {name: outName, content: icsText};
+  outParts.push("calwright: wrote " + events.length + " event(s) to " + outName);
+  return outParts.join("\n");
+};
+</script>
+<script>
+var SAMPLE = "title,start,end,description,location,timezone,recurrence,all_day\nTeam standup,2026-10-26 09:00,2026-10-26 09:30,Daily sync with the remote crew,Zoom,America/New_York,FREQ=DAILY,\nSprint planning,2026-10-28 14:00,2026-10-28 15:30,\"Plan next sprint; bring estimates, blockers\",Meeting room 3,Europe/London,FREQ=WEEKLY;BYDAY=WE,\nRelease day,2026-11-01,,Ship v2.0 to production,,,,yes\nDentist appointment,10/29/2026 3:00 PM,,Routine checkup,Smile Clinic,America/Chicago,,\n";
+var inputEl = document.getElementById("input");
+var outputEl = document.getElementById("output");
+document.getElementById("file").addEventListener("change", function(ev){
+  var f = ev.target.files[0]; if(!f) return;
+  var r = new FileReader(); r.onload = function(){ inputEl.value = r.result; }; r.readAsText(f);
+});
+function gatherOptions(){
+  return {
+    defaultTz: document.getElementById("defaulttz").value || null,
+    outputName: document.getElementById("outname").value || "events.ics",
+    utc: document.getElementById("utc").checked,
+    check: document.getElementById("check").checked,
+    summary: document.getElementById("summary").checked
+  };
+}
+document.getElementById("run").addEventListener("click", function(){
+  try { outputEl.textContent = window.runTool(inputEl.value, gatherOptions()); }
+  catch(e){ outputEl.textContent = "Error: " + e.message; }
+});
+document.getElementById("sample").addEventListener("click", function(){ inputEl.value = SAMPLE; });
+function downloadBlob(content, name){
+  var blob = new Blob([content], {type: "text/plain"});
+  var a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); URL.revokeObjectURL(a.href);
+}
+document.getElementById("download").addEventListener("click", function(){
+  if(window.__dl) downloadBlob(window.__dl.content, window.__dl.name);
+});
+document.getElementById("downloadReport").addEventListener("click", function(){ downloadBlob(outputEl.textContent, "report.txt"); });
+</script>
+</body>
+</html>
