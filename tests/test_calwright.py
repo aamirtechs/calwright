@@ -595,5 +595,33 @@ class TestCli(unittest.TestCase):
             self.assertIn("DTSTART:20261023T140000Z", text)
 
 
+# ---------------------------------------------------------------------------
+# Out-of-range date arithmetic
+# ---------------------------------------------------------------------------
+
+class TestOutOfRangeDates(unittest.TestCase):
+    def test_huge_duration_is_reported_not_raised(self):
+        events = events_from("title,start,duration\nBig,2026-01-01 09:00,P1000000000D\n")
+        self.assertEqual(len(events), 1)
+        self.assertTrue(any("duration" in error for error in events[0].errors))
+
+    def test_default_end_past_datetime_max_is_reported(self):
+        events = events_from("title,start\nLate,9999-12-31 23:30\n")
+        self.assertEqual(len(events), 1)
+        self.assertTrue(any("out of range" in error for error in events[0].errors))
+
+    def test_allday_default_end_past_datetime_max_is_reported(self):
+        events = events_from("title,start\nLate,9999-12-31\n")
+        self.assertEqual(len(events), 1)
+        self.assertTrue(any("out of range" in error for error in events[0].errors))
+
+    def test_overflow_duration_check_exits_nonzero_without_crash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.csv"
+            path.write_text("title,start,duration\nBig,2026-01-01 09:00,P1000000000D\n",
+                            encoding="utf-8")
+            self.assertEqual(main([str(path), "--check"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

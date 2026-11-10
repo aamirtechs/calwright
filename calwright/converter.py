@@ -343,7 +343,7 @@ def build_events(rows, default_tz=None, convert_to_utc=False):
         elif duration_raw and start is not None:
             try:
                 end = start + parse_duration(duration_raw)
-            except ValueError as exc:
+            except (ValueError, OverflowError) as exc:
                 errors.append("unparseable duration: %s" % exc)
 
         exdate_raw = (row.get("exdate") or "").strip()
@@ -370,10 +370,16 @@ def build_events(rows, default_tz=None, convert_to_utc=False):
             pass
         elif all_day:
             if end is None and isinstance(start, date):
-                end = start + timedelta(days=1)
+                try:
+                    end = start + timedelta(days=1)
+                except OverflowError:
+                    errors.append("end is out of range")
         else:
             if end is None:
-                end = start + timedelta(hours=1)
+                try:
+                    end = start + timedelta(hours=1)
+                except OverflowError:
+                    errors.append("end is out of range")
 
         tzid = None
         event_tz = None
